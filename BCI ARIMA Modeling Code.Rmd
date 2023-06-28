@@ -1,0 +1,792 @@
+---
+title: "BCI ARIMA Modeling"
+author: "Marlene Gonzalez, Zachary Peskin, Lucille Peterson, Michael Piccolo"
+date: '2023-05-13'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+This is a formal compilation of our code work throughout the BCI Analysis Project. We'll explain the steps to take to appropriately handle the data, produce visualizations for exploratory data analysis, simulate data for a strong modeling foundation, and then the models themselves.
+
+First after a standard knitr formatting call are several library calls. We used a variety of functions that come from highly used packages. You'll need to install the packages and then run these lines during your session to load in the functions they provide.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(class)
+library(caret)
+library(eegkit) #EEG handling
+library(tseries)
+library(labelled) #A data formatting function here and there
+library(forecast)
+library(gridExtra)
+library(tidyverse) #A vast collection of common useful packages
+library(ggcorrplot) #Correlation Heatmap for EDA
+```
+
+For reading in the data for use in R, we ran functions in MATLAB to turn .mat files into .csv files. There are several approaches to appropriately read data, but that's what we did - reading .csv files into R is very standard. You'll also have to set the working directory - you can write a specific line of code to do this, or you can go to Session ->  Set Working Directory -> etc. to choose the directory to have the R session search for files.
+
+We read the data in from .csv files and create objects containing their data - cropping out calibration periods, sub-setting to create objects dedicated to fNIRS and EEG data, as well as running tsclean(), which handles wildly skewed outlier values in the data. At a slight risk of massaging the data, extreme spikes in the data that could very well have been motion noise renders many visualizations illegible and inappropriately overpowers trends of the overall data in modeling.
+
+```{r}
+GT1 = read.csv("Garrett_stress1.csv", header = FALSE) #Reading in Garrett's Data
+GT2 = read.csv("Garrett_stress2.csv", header = FALSE)
+GT3 = read.csv("Garrett_stress3.csv", header = FALSE)
+GT4 = read.csv("Garrett_stress4.csv", header = FALSE)
+
+GT1 = tail(GT1, n = 45000) #Cropping out calibration periods
+GT2 = tail(GT2, n = 45000) #The segments were 90 seconds long - 45000 entries, one for every 0.02 seconds.
+GT3 = tail(GT3, n = 45000) #You can manually check object lengths and subtract 45000 to find bounds to subset, or use this tail function.
+GT4 = tail(GT4, n = 45000)
+
+MT1 = read.csv("Mohammad_stress1.csv", header = FALSE) #Reading in Mohammad's Data
+MT2 = read.csv("Mohammad_stress2.csv", header = FALSE)
+MT3 = read.csv("Mohammad_stress3.csv", header = FALSE)
+MT4 = read.csv("Mohammad_stress4.csv", header = FALSE)
+
+MT1 = tail(MT1, n = 45000) #Cropping out calibration periods
+MT2 = tail(MT2, n = 45000)
+MT3 = tail(MT3, n = 45000)
+MT4 = tail(MT4, n = 45000)
+
+GT1_fNIRS = GT1[,2:17] #Subsetting fNIRS Data
+GT2_fNIRS = GT2[,2:17]
+GT3_fNIRS = GT3[,2:17]
+GT4_fNIRS = GT4[,2:17]
+
+GT1_HbO = GT1_fNIRS[,c(1,3,5,7,9,11,13,15)] #We'll be using this subset specifically later with ARIMA modeling, so may as well here.
+GT2_HbO = GT2_fNIRS[,c(1,3,5,7,9,11,13,15)]
+GT3_HbO = GT3_fNIRS[,c(1,3,5,7,9,11,13,15)]
+GT4_HbO = GT4_fNIRS[,c(1,3,5,7,9,11,13,15)]
+
+MT1_fNIRS = MT1[,2:17] #Subsetting fNIRS Data
+MT2_fNIRS = MT2[,2:17]
+MT3_fNIRS = MT3[,2:17]
+MT4_fNIRS = MT4[,2:17]
+
+GT1_EEG = GT1[,18:30] #Subsetting EEG Data
+GT2_EEG = GT2[,18:30]
+GT3_EEG = GT3[,18:30]
+GT4_EEG = GT4[,18:30]
+
+MT1_EEG = MT1[,18:30] #Subsetting EEG Data
+MT2_EEG = MT2[,18:30]
+MT3_EEG = MT3[,18:30]
+MT4_EEG = MT4[,18:30]
+
+for (i in 1:16){ #A bit of extreme outlier smoothing (fNIRS)
+  GT1_fNIRS[,i] = tsclean(GT1_fNIRS[,i]) 
+  GT2_fNIRS[,i] = tsclean(GT2_fNIRS[,i])
+  GT3_fNIRS[,i] = tsclean(GT3_fNIRS[,i])
+  GT4_fNIRS[,i] = tsclean(GT4_fNIRS[,i])
+  
+  MT1_fNIRS[,i] = tsclean(MT1_fNIRS[,i])
+  MT2_fNIRS[,i] = tsclean(MT2_fNIRS[,i])
+  MT3_fNIRS[,i] = tsclean(MT3_fNIRS[,i])
+  MT4_fNIRS[,i] = tsclean(MT4_fNIRS[,i])
+}
+
+for (i in 1:13){ #A bit of extreme outlier smoothing (EEG)
+  GT1_EEG[,i] = tsclean(GT1_EEG[,i]) 
+  GT2_EEG[,i] = tsclean(GT2_EEG[,i])
+  GT3_EEG[,i] = tsclean(GT3_EEG[,i])
+  GT4_EEG[,i] = tsclean(GT4_EEG[,i])
+  
+  MT1_EEG[,i] = tsclean(MT1_EEG[,i])
+  MT2_EEG[,i] = tsclean(MT2_EEG[,i])
+  MT3_EEG[,i] = tsclean(MT3_EEG[,i])
+  MT4_EEG[,i] = tsclean(MT4_EEG[,i])
+}
+```
+
+This is the provided data from Javier's project that we used to explore, simulate, and model. Any data can be read in, made into subsets, and cleaned in a similar fashion. We can now look at several different forms of data visualization.
+
+First is a collection of time series plots for all of the EEG channels from one segment of a subject's data. Specifically this is from Garrett's 2nd segment. Previously observing these graphs, some channels got considerably flattened with huge slim peaks of voltage dwarfing the rest of the data - if you see this and haven't ran tsclean, that might be a sign to consider data cleaning.
+
+Also, this is base R output. We'll also go over ggplot code/output, which might prove slightly trickier to use, but provides a cleaner finish and much more potential for more nuanced/detailed graphing. While these could all be called individually, it'd be cleaner to make a function out of it.
+
+```{r, fig.show='hold', fig.align='center', out.width='45%'}
+eegtimeseries = function(data, segment, channel) {
+  ts.plot(
+    data[, channel],
+    gpars = list(
+      xlab = "Time (0.002 seconds)",
+      ylab = "microvolts",
+      main = paste("Segment ", segment, ": EEG Signals Channel ", channel, sep = ""),
+      col = channel
+    )
+  )
+}
+eegtimeseries(GT2_EEG, 2, 1)
+eegtimeseries(GT2_EEG, 2, 2)
+eegtimeseries(GT2_EEG, 2, 3)
+eegtimeseries(GT2_EEG, 2, 4)
+eegtimeseries(GT2_EEG, 2, 5)
+eegtimeseries(GT2_EEG, 2, 6)
+eegtimeseries(GT2_EEG, 2, 7)
+eegtimeseries(GT2_EEG, 2, 8)
+eegtimeseries(GT2_EEG, 2, 9)
+eegtimeseries(GT2_EEG, 2, 10)
+eegtimeseries(GT2_EEG, 2, 11)
+eegtimeseries(GT2_EEG, 2, 12)
+eegtimeseries(GT2_EEG, 2, 13)
+```
+
+We can look at fNIRS data in a similar fashion, by individual channels or as a collective. A side note, the ts() function can be used to create "time series" objects in R for further applications in packaged functions, like autoplot().
+
+```{r}
+GT4_ts = ts(GT4, start = 0, frequency = 500,
+                 names = c('Time', 'HbO1', 'HbR1', 'HbO2', 'HbR2', 'HbO3', 'HbR3',
+                           'HbO4', 'HbR4', 'HbO5', 'HbR5','HbO6', 'HbR6',
+                           'HbO7', 'HbR7', 'HbO8', 'HbR8', 'EEG1', 'EEG2',
+                           'EEG3','EEG4','EEG5','EEG6','EEG7','EEG8',
+                           'EEG9', 'EEG10', 'EEG11', 'EEG12', 'EEG13'))
+GT4_tsf = GT4_ts[,c(2,4,6,8,10,12,14,16)]
+
+autoplot(GT4_ts[,10], ylab = 'micromolars', xlab = 'Seconds', col='#b27e05',
+               main = 'Subject 1 Segment 4: HbO Channel 5', ylim=c(0.07, 0.074)) +
+  theme(axis.title = element_text(size = 16), 
+        axis.text = element_text(size = 14),
+        plot.title = element_text(size = 16))
+
+autoplot(GT4_tsf, ylab = 'micromolars', xlab = 'Seconds',
+               main = 'Subject 1 Segment 4: HbO Channels', ylim=c(0.055, 0.0725)) +
+  theme(axis.title = element_text(size = 16), 
+        axis.text = element_text(size = 14),
+        plot.title = element_text(size = 16))
+```
+
+Using the eegpsd() function, we may observe EEG data after passing in the frequency domain, post Fourier transformation. par(mfrow=) in base R lets us structure output of graphs in a collage to be observed side by side, and the lower/upper bounds lets us specify which wave types to look at (4-8 theta, 8-13 alpha, 13-30 beta). Here we observe all 4 segments, control and non-control, of Garrett's EEG channel 10 data. As expected, we observed lower values of alpha waves in non-control segments compared to the control, however it should be re-iterated that this expected outcome was not always observed for all channels/wave types - likely due to being thin 1/13 slices of information and just being one small spot in the brain.
+
+```{r, echo=FALSE,fig.show='hold', fig.align='center', out.width='45%'}
+#Alpha Waves.
+par(mfrow = c(2, 2))
+eegpsd(GT1_EEG[,10], Fs=512, lower = 8, upper = 13, units = 'mV^2', ylim=range(0:4/5), t='l',
+       main=' Segment 1 Channel 10 Alpha Wave', col=1)
+eegpsd(GT2_EEG[,10], Fs=512, lower = 8, upper = 13, units = 'mV^2', ylim=range(0:4/5), t='l',
+       main=' Segment 2 Channel 10 Alpha Wave', col=2)
+eegpsd(GT3_EEG[,10], Fs=512, lower = 8, upper = 13, units = 'mV^2', ylim=range(0:4/5), t='l',
+       main=' Segment 3 Channel 10 Alpha Wave', col=3)
+eegpsd(GT4_EEG[,10], Fs=512, lower = 8, upper = 13, units = 'mV^2', ylim=range(0:4/5), t='l',
+       main=' Segment 4 Channel 10 Alpha Wave', col=4)
+```
+
+You could of course instead of having alpha waves of all four segments, make graphs of one channel and one segment's three different waves and observe those similarly. You can also access this data more flexibly using the eegfft() function. Here's an example of that - with ggplot graphing.
+
+```{r}
+theta2G=eegfft(GT2_EEG[,10], Fs=512, lower=4, upper=8)
+alpha2G=eegfft(GT2_EEG[,10], Fs=512, lower=8, upper=13)
+beta2G=eegfft(GT2_EEG[,10], Fs=512, lower=13, upper=30)
+
+ggplot(data = alpha2G, aes(x=frequency, y=strength^2)) + geom_line(linetype=1, color="#3A64AD") + labs(x="Frequency (Hz)", y="Microvoltage", title="Segment 2 Channel 10 Alpha Waves") + ylim(0,0.5)
+ggplot(data = beta2G, aes(x=frequency, y=strength^2)) + geom_line(linetype=1, color="#209838") + labs(x="Frequency (Hz)", y="Microvoltage", title="Segment 2 Channel 10 Beta Waves") + ylim(0,0.5)
+ggplot(data = theta2G, aes(x=frequency, y=strength^2)) + geom_line(linetype=1, color="#B27E05") + labs(x="Frequency (Hz)", y="Microvoltage", title="Segment 2 Channel 10 Theta Waves") + ylim(0,0.5)
+
+```
+
+Even further, we can observe differences in activity for wave types from segments, and using kernel regression smoothing, draw lines demonstrating the overall trend. It's a bit of work, but we can make a collage of the differences in Channel 10 between segment 4 and 2 for all wave types.
+
+```{r}
+### Difference of PSD power estimates of alpha
+# Alpha trial 2
+trial2.a = (eegfft(GT2_EEG[,10], Fs = 512, lower = 8, upper = 13))
+
+# Alpha trial 4
+trial4.a = eegfft(GT4_EEG[,10], Fs = 512, lower = 8, upper = 13)
+
+# get frequency find the difference in alpha's
+x.a = trial2.a$frequency
+y.a = trial4.a$strength^2 - trial2.a$strength^2 # squared microvolts
+
+# optimize bandwidth using Silverman's rule of thumb
+h.a = 1.06*sd(x.a)*length(x.a)^(-.2)
+
+# kernel regression smoothing of difference in alpha's
+smooth.a = ksmooth(x.a, y.a, kernel = 'normal', 
+                    bandwidth = h.a)$y
+
+# store values in a dataframe
+alpha.diff = data.frame(x.a, y.a, smooth.a)
+
+# Plot of alpha difference
+p1 = alpha.diff %>%
+  ggplot(aes(x=x.a, y=y.a))+
+  geom_line(color = '#3a64ad') +
+  geom_line(aes(y=smooth.a), color = rgb(1, 0.4, 0.2), lwd=1) +
+  labs(x = NULL,
+       y = NULL,
+       title = 'Channel 10 Alpha difference') +
+  theme(plot.title=element_text(size=10))
+
+
+
+### Difference of PSD power estimates of beta
+# Beta trial 2
+trial2.b = (eegfft(GT2_EEG[,10], Fs = 512, lower = 13, upper = 30))
+
+# Beta trial 4
+trial4.b = eegfft(GT4_EEG[,10], Fs = 512, lower = 13, upper = 30)
+
+# get frequency and find the difference in beta's
+x.b = trial2.b$frequency
+y.b = trial4.b$strength^2 - trial2.b$strength^2 # squared microvolts
+
+# optimize bandwidth using Silverman's rule of thumb
+h.b = 1.06*sd(x.b)*length(x.b)^(-.2)
+
+# kernel regression smoothing of difference in alpha's
+smooth.b = ksmooth(x.b, y.b, kernel = 'normal', 
+                    bandwidth = h.b)$y
+
+# store values in a dataframe
+beta.diff = data.frame(x.b, y.b, smooth.b)
+
+# Plot of alpha difference
+p2 = beta.diff %>%
+  ggplot(aes(x=x.b, y=y.b))+
+  geom_line(color = '#209838') +
+  geom_line(aes(y=smooth.b), color = rgb(1, 0.4, 0.2), lwd=1) +
+  labs(x = NULL,
+       y = NULL,
+       title = 'Channel 10 Alpha difference') +
+  theme(plot.title=element_text(size=10))
+
+
+
+### Difference of PSD power estimates of theta
+# theta trial 2
+trial2.t = (eegfft(GT2_EEG[,10], Fs = 512, lower = 4, upper = 8))
+
+# theta trial 4
+trial4.t = eegfft(GT4_EEG[,10], Fs = 512, lower = 4, upper = 8)
+
+# get frequency and find the difference in theta's
+x.t = trial2.t$frequency
+y.t = trial4.t$strength^2 - trial2.t$strength^2 # squared microvolts
+
+# optimize bandwidth using Silverman's rule of thumb
+h.t = 1.06*sd(x.t)*length(x.t)^(-.2)
+
+# kernel regression smoothing of difference in alpha's
+smooth.t = ksmooth(x.t, y.t, kernel = 'normal', 
+                    bandwidth = h.t)$y
+
+# store values in a dataframe
+theta.diff = data.frame(x.t, y.t, smooth.t)
+
+# Plot of alpha difference
+p3 = theta.diff %>%
+  ggplot(aes(x=x.t, y=y.t))+
+  geom_line(color = '#b27e05') +
+  geom_line(aes(y=smooth.t), color = rgb(1, 0.4, 0.2), lwd=1) +
+  labs(x = NULL,
+       y = NULL,
+       title = 'Channel 10 Alpha difference') +
+  theme(plot.title=element_text(size=10))
+
+# display PSD difference plots
+grid.arrange(p1, p2, p3, nrow=3, left = 'Power (mV^2)')
+```
+
+
+
+It's not what we used to determine our most representative channels, but with the ggcorrplot package, we could look at a correlation heat map of all our EEG channels to get a bird's eye view of the different channels and how correlated they are with one another. When originally observing the 13 different time series from this segment, there were certain patterns of graphs that would show up here and there - we see them clump up together in a heat map like this.
+
+(Since this is a subset that took columns 18 through 30, you'd have to redefine the columns, or subtract 17 from each of these to denote which channel is which.)
+
+```{r}
+corrm=round(cor(GT2_EEG), 1)
+ggcorrplot(corrm, hc.order = TRUE, type = "lower",
+           outline.col = "white",
+           ggtheme = ggplot2::theme_gray,
+           colors = c("#6D9EC1", "white", "#E46726"))
+```
+
+That cor() function coll is what gave us the correlation matrix to base this on. To actually determine our representative channels, we averaged columns and settled on the max. We wrote a function BestRep() to do this.
+
+```{r}
+BestRep=function(correlation){ #Give this function a correlation matrix and you'll be told which column has the highest average correlation with others!
+  means=colMeans(correlation)
+  which(means==max(means))
+}
+
+corG1=cor(GT1_EEG) #Garrett Correlation Matrices
+corG2=cor(GT2_EEG)
+corG3=cor(GT3_EEG)
+corG4=cor(GT4_EEG)
+
+corM1=cor(MT1_EEG) #Mohammad Correlation Matrices
+corM2=cor(MT2_EEG)
+corM3=cor(MT3_EEG)
+corM4=cor(MT4_EEG)
+
+BestRep(corG1) #The Most Correlated With Other Channels Channel for each segment/subject
+BestRep(corG2)
+BestRep(corG3)
+BestRep(corG4)
+BestRep(corM1)
+BestRep(corM2)
+BestRep(corM3)
+BestRep(corM4)
+```
+
+So Garrett's most correlated channels on average across the 4 segments were 6, 9, 6, and 10. For Mohammad it was 7, 10, 7, and 10. We were primarily comparing and contrasting non-control segments in our study. We can observe these representative channels side by side, keeping in mind the inevitable differences by both channel number and subject. For this reason, it's particularly interesting to observe segment 4, where the two subjects shared the same Most Representative Channel.
+
+```{r, echo=FALSE,fig.show='hold', fig.align='center', out.width='45%'}
+par(mfrow=c(3,2)) #Time Series Pairs
+ts.plot(GT2_EEG[,9], gpars=list(xlab="Time (0.002 seconds)", ylab="microvolts",
+                             main = "Subject 1 Segment 2: EEG Signals Channel 9", 
+                             col=c(1)))
+ts.plot(MT2_EEG[,10], gpars=list(xlab="Time (0.002 seconds)", ylab="microvolts",
+                             main = "Subject 2 Segment 2: EEG Signals Channel 10", 
+                             col=c(1)))
+ts.plot(GT3_EEG[,6], gpars=list(xlab="Time (0.002 seconds)", ylab="microvolts",
+                             main = "Subject 1 Segment 3: EEG Signals Channel 6", 
+                             col=c(2)))
+ts.plot(MT3_EEG[,7], gpars=list(xlab="Time (0.002 seconds)", ylab="microvolts",
+                             main = "Subject 2 Segment 3: EEG Signals Channel 7", 
+                             col=c(2)))
+ts.plot(GT4_EEG[,10], gpars=list(xlab="Time (0.002 seconds)", ylab="microvolts",
+                             main = "Subject 1 Segment 4: EEG Signals Channel 10", 
+                             col=c(3)))
+ts.plot(MT4_EEG[,10], gpars=list(xlab="Time (0.002 seconds)", ylab="microvolts",
+                             main = "Subject 2 Segment 4: EEG Signals Channel 10", 
+                             col=c(3)))
+```
+
+(Side note: sometimes there are finicky complications with code output embedded in these code chunks in an R Markdown file. You can take the same code lines and copy paste and run them in the console directly to get these in the Plots section in the bottom right, which usually doesn't run into these problems, though your mileage may vary on your machine and version of R/RStudio.)
+
+We can of course compare similarly the two subjects' data in the frequency domain. eegpsd() again is handy for this, though with three waves you've got a lot more to look at - it's 18 graphs for both subjects, all segments, and all of the wave types of interest (not including sigma or delta). Here's the comparison for segment  4.
+
+```{r, echo=FALSE,fig.show='hold', fig.align='center', out.width='45%'}
+par(mfrow=c(2,3)) #Fourier Transform Frequency Groups
+eegpsd(GT4_EEG[,10], Fs=512, lower = 8, upper = 13, units = 'mV^2', ylim=range(0:4/5), t='l',
+       main='S1 Segment 4 Channel 10 Alpha Wave', col=2)
+eegpsd(GT4_EEG[,10], Fs=512, lower = 13, upper = 30, units = 'mV^2', ylim=range(0:1/2), t='l',
+       main='S1 Segment 4 Channel 10 Beta Wave', col=3)
+eegpsd(GT4_EEG[,10], Fs=512, lower = 4, upper = 8, units = 'mV^2', ylim=range(0:3/2), t='l',
+       main='S1 Segment 4 Channel 10 Theta Wave', col=4)
+eegpsd(MT4_EEG[,10], Fs=512, lower = 8, upper = 13, units = 'mV^2', ylim=range(0:4/5), t='l',
+       main='S2 Segment 4 Channel 10 Alpha Wave', col=2)
+eegpsd(MT4_EEG[,10], Fs=512, lower = 13, upper = 30, units = 'mV^2', ylim=range(0:1/2), t='l',
+       main='S2 Segment 4 Channel 10 Beta Wave', col=3)
+eegpsd(MT4_EEG[,10], Fs=512, lower = 4, upper = 8, units = 'mV^2', ylim=range(0:1/2), t='l',
+       main='S2 Segment 4 Channel 10 Theta Wave', col=4)
+```
+
+When we first looked at this, it was interesting to see the stark differences that, presumably, differences in subjects accounted for, even across the same EEG channel/placement on the head. Particularly, the enormous discrepancy in theta waves was a bit concerning, though we understand that theta waves tend to behave with a lot more variation compared to alpha and beta waves. We could go further and investigate similar data from other subjects to potentially identify one of these subjects as an outlier in terms of the theta data behavior, though with new/higher quality data coming in on your end, and with the primary concern of modeling in mind, we ended up shelving this.
+
+With our most representative channels in tow, we'd then look towards identifying the best means of simulating the data - the ARIMA models best fit for the job. The following can also be applied to fNIRS, however it is important to note that due to some data exhibiting too much stationarity, the function provided will return an error with No Differencing models. You may consider writing an alternative function with only the 1 factor differencing, or handpick components out of this function to run independently to evaluate different ARIMA models for similar time series data at your discretion.
+
+```{r}
+#### ARIMA model selection: Empirical approach
+
+### function builds ARIMA models for AR(1-3) and MA(0-3) with 
+### differencing of zero and one and chooses the model with the 
+### lowest AIC for each channel of the data set for both d=0 and d=1
+### Input parameter 'segment' must be a matrix
+arima_aic = function(segment) {
+  n = dim(segment)[2]
+  d0_mat = matrix(NA, nrow = n, ncol = 3)
+  d1_mat = matrix(NA, nrow = n, ncol = 3)
+  for (i in 1:n){
+    diff0_aic = matrix(NA, nrow = 3, ncol = 4)
+    for (p in 1:3) {
+      for (q in 0:3) {
+        arima_model = arima(segment[, i], order=c(p,0,q))
+        diff0_aic[p,q+1] = arima_model$aic
+      }
+    }
+    diff1_aic = matrix(NA, nrow = 3, ncol = 4)
+    for (p in 1:3) {
+      for (q in 0:3) {
+        arima_model = arima(segment[, i], order=c(p,1,q))
+        diff1_aic[p,q+1] = arima_model$aic
+      }
+    }
+    diff0_min = which(diff0_aic == min(diff0_aic), arr.ind = TRUE)
+    diff1_min = which(diff1_aic == min(diff1_aic), arr.ind = TRUE)
+    
+    d0_mat[i,] = c(diff0_min[,1], diff0_min[,2]-1, min(diff0_aic))
+    d1_mat[i,] = c(diff1_min[,1], diff1_min[,2]-1, min(diff1_aic))
+    
+  }
+
+  # n is the number of time series channels modeled.   
+  # d0 displays the optimal number of p AR terms and q MA terms 
+  # and the AIC for the of the best model with zero differencing.
+  # d1 displays the optimal number of p AR terms and q MA terms 
+  # and the AIC for the of the best model with zero differencing.  
+  list(n = n, d0 = d0_mat, d1 = d1_mat)
+  
+}
+
+
+##### Find the best ARMA model for Garrett's EEG channels for segments 2-4 
+## Note: this can take quite a while to run
+garrett2_arima = arima_aic(GT2_EEG) 
+garrett3_arima = arima_aic(GT3_EEG) 
+garrett4_arima = arima_aic(GT4_EEG) 
+```
+
+These arima_aic() output lists include, for both 0 and 1 differencing, the strongest possible ARIMA models across the range of AR levels 1-3 and MA levels 0-3, measured by their AIC values (which we'd like to minimize), also included.
+
+```{r}
+garrett4_arima
+```
+
+Consistently, higher degrees of Auto Regression and Moving Average yield the strongest results with our data. Channel 10 also yields the lowest AIC with and without differencing. Speaking of, if you've already determined your representative channels to simulate, you can trim the computation time fat and simply run those channels through this function.
+
+```{r}
+##### Find the best ARMA model for Mohammad's EEG channel 10 for segment 4
+## computational time is not very long
+garrett4_arima10 = arima_aic(as.matrix(GT4_EEG[,10])) 
+garrett4_arima10
+mohammad4_arima10 = arima_aic(as.matrix(MT4_EEG[,10])) 
+mohammad4_arima10
+```
+
+So we'll be going with AR factor 3, MA factor 3, and 0 differencing - for both subjects. 
+
+With the proper ARIMA models and strong representative channels in tow, it is then time to simulate and model. While it takes considerably more computation power as the number is increased, it is important to run an appropriately high amount of simulations of the data such that it's not inappropriately skewed - our initial modeling attempts identifying EEG vs HbO appeared astonishingly strong with a small amount of samples, even with egregiously poor tuning parameters, until larger simulation amounts stress tested it and accuracy tanked to 50%.
+
+We ran 100 simulations of segment 4 data from both Garrett and Mohammad. If you have available machinery that can sample and model more within a reasonable time frame, strongly consider making that change! On the other hand, if you can run these models in trivial amounts of time, that also means it's easier to run several different tuning parameter values and improve modeling in that way.
+
+Thus begins the modeling process:
+
+Step 1: A number (100, here) of simulations of both subject's most representative channel, using the appropriate ARIMA model for each.
+Step 2: Apply the Fourier Transformation to both to obtain their alpha, beta, and theta wave values.
+Step 3: Place all of the simulated data into one matrix or data frame to process - during so, making sure to label every single point Subject and Wave Type wise. For Subject, we put 1 for Garrett and 2 for Mohammad, and for Wave Type we put 1/2/3 for Alpha/Beta/Theta respectively.
+Step 4: Model, model, model! Different types, different tuning parameters, and so on. Each time we can observe Confusion Matrices to see what kinds of prediction errors are being made and how frequently.
+
+It's also important whenever working with anything involving random number generation to set a seed with set.seed() to make results as reproducible as possible. If you're not entirely certain in which instances you need to set the seed, just always head the work off with a set.seed() call.
+
+```{r, echo=FALSE}
+set.seed(92148)
+#Step 1. n=100.
+##### 100 simulations of Garrett, segment 4, EEG channel 10
+# start with running the model and get parameter estimates
+arima.4.EEG10G <- arima(GT4_EEG[,10], order=c(3, 0, 3))         
+summary(arima.4.EEG10G) # get coefficients and estimated standard error
+
+# run 100 simulations and store the results in a matrix with each simulation
+# is a row and the observations values are columns
+sim.EEG.matG <- matrix(NA, nrow = 45000, ncol = 100)
+for(i in 1:100){
+  sim.EEG.matG[,i] <- arima.sim(n = 45000, list(ar = c(arima.4.EEG10G$coef[1], 
+                                                      arima.4.EEG10G$coef[2], 
+                                                      arima.4.EEG10G$coef[3]),
+                                       ma = c(arima.4.EEG10G$coef[4], 
+                                              arima.4.EEG10G$coef[5], 
+                                              arima.4.EEG10G$coef[6])),
+                               sd=sqrt(arima.4.EEG10G$sigma2)) + arima.4.EEG10G$coef[7]
+}
+##### 100 simulations of Mohammad, segment 4, EEG channel 10
+# start with running the model and get parameter estimates
+arima.4.EEG10M <- arima(MT4_EEG[,10], order=c(3, 0, 3))
+summary(arima.4.EEG10M)
+
+# run 100 simulations and store the results in a matrix with each simulation
+# is a row and the observations values are columns
+sim.EEG.matM <- matrix(NA, nrow = 45000, ncol = 100)
+for(i in 1:100){
+  sim.EEG.matM[,i] <- arima.sim(n = 45000, list(ar = c(arima.4.EEG10M$coef[1], 
+                                                      arima.4.EEG10M$coef[2], 
+                                                      arima.4.EEG10M$coef[3]),
+                                          ma = c(arima.4.EEG10M$coef[4], 
+                                                 arima.4.EEG10M$coef[5])),
+                               sd=sqrt(arima.4.EEG10M$sigma2)) + arima.4.EEG10M$coef[6]
+}
+```
+
+
+
+```{r}
+#Step 2
+alphaG = eegfft(sim.EEG.matG, Fs=512, lower=8, upper=13)
+betaG = eegfft(sim.EEG.matG, Fs=512, lower=13, upper=30)
+thetaG = eegfft(sim.EEG.matG, Fs=512, lower=4, upper=8)
+
+alphaM = eegfft(sim.EEG.matM, Fs=512, lower=8, upper=13)
+betaM = eegfft(sim.EEG.matM, Fs=512, lower=13, upper=30)
+thetaM = eegfft(sim.EEG.matM, Fs=512, lower=4, upper=8)
+```
+
+Bear with us - this sequence of running Step 3 is pretty bulky...it could probably do with a bit of streamlining in writing a function. We have in this example 100 simulations for every single unique frequency - alpha/beta/theta have respectively 439/1494/352. 439 + 1494 + 352 = 2285, * 200 is 457 thousand entries.
+
+```{r}
+set.seed(92148)
+#Step 3
+fourier.sims = matrix(NA, nrow = 457000, ncol = 4) #We're doing this in six parts! Subject 1 alpha beta theta, Subject 2 alpha beta theta.
+columns = c("Subject","Wave.Type","Frequency","Strength")
+colnames(fourier.sims) = columns
+index = 1 #SUBJECT 1 ALPHA WAVES
+for(i in 1:439){
+  for(j in 1:100){
+    fourier.sims[((i-1)*100)+j,1]=1
+    fourier.sims[((i-1)*100)+j,2]=1
+    fourier.sims[((i-1)*100)+j,3]=alphaG$frequency[i]
+    fourier.sims[((i-1)*100)+j,4]=alphaG$strength[index,j]
+  }
+  index=index+1
+}
+
+index=1 #SUBJECT 1 BETA WAVES
+for(i in 1:1494){
+  for(j in 1:100){
+    fourier.sims[43900+((i-1)*100)+j,1]=1 #nrow for fourier.sims and these initial index starter values segment by segment is based on simulation number!
+    fourier.sims[43900+((i-1)*100)+j,2]=2 #These numbers (457000, 43900, 193300, 228500 etc) will have to be adjusted with different sample amounts.
+    fourier.sims[43900+((i-1)*100)+j,3]=betaG$frequency[i]
+    fourier.sims[43900+((i-1)*100)+j,4]=betaG$strength[index,j]
+  }
+  index=index+1
+}
+
+index=1 #SUBJECT 1 THETA WAVES
+for(i in 1:352){
+  for(j in 1:100){
+    fourier.sims[193300+((i-1)*100)+j,1]=1
+    fourier.sims[193300+((i-1)*100)+j,2]=3
+    fourier.sims[193300+((i-1)*100)+j,3]=thetaG$frequency[i]
+    fourier.sims[193300+((i-1)*100)+j,4]=thetaG$strength[index,j]
+  }
+  index=index+1
+}
+
+index=1 #SUBJECT 2 ALPHA WAVES
+for(i in 1:439){
+  for(j in 1:100){
+    fourier.sims[228500+((i-1)*100)+j,1]=2
+    fourier.sims[228500+((i-1)*100)+j,2]=1
+    fourier.sims[228500+((i-1)*100)+j,3]=alphaM$frequency[i]
+    fourier.sims[228500+((i-1)*100)+j,4]=alphaM$strength[index,j]
+  }
+  index=index+1
+}
+
+index=1 #SUBJECT 2 BETA WAVES
+for(i in 1:1494){
+  for(j in 1:100){
+    fourier.sims[272400+((i-1)*100)+j,1]=2
+    fourier.sims[272400+((i-1)*100)+j,2]=2
+    fourier.sims[272400+((i-1)*100)+j,3]=betaM$frequency[i]
+    fourier.sims[272400+((i-1)*100)+j,4]=betaM$strength[index,j]
+  }
+  index=index+1
+}
+
+index=1 #SUBJECT 2 THETA WAVES
+for(i in 1:352){
+  for(j in 1:100){
+    fourier.sims[421800+((i-1)*100)+j,1]=2
+    fourier.sims[421800+((i-1)*100)+j,2]=3
+    fourier.sims[421800+((i-1)*100)+j,3]=thetaM$frequency[i]
+    fourier.sims[421800+((i-1)*100)+j,4]=thetaM$strength[index,j]
+  }
+  index=index+1
+}
+fourier.sims = as.data.frame(fourier.sims)
+fourier.sims$Subject = as.factor(fourier.sims$Subject) #Making our arbitrary classifier flags factors rather than numbers.
+fourier.sims$Wave.Type = as.factor(fourier.sims$Wave.Type) #Potentially would be better to define them differently from the get go, but a trivial extra step.
+fourier.sims$Strength = (fourier.sims$Strength)^2 #These values are typically presented in squared form from what we've seen.
+```
+
+Now, we do a bit of setting up for more thorough use of the data for strong accuracy's sake: We set up a training and test set - develop the model with 80% of the simulated data, evaluate the results with the remaining 20%. We also do this repeatedly using different chunks of the data as training or test sets to further prevent skewed results - in this case we use 5 different combinations: 5 Fold Cross Validation.
+
+Then we run K-Nearest Neighbors. In our work, with the provided/simulated data, k=19 gave us our best results. This is where each individual running of models ran up several minutes on our end.
+
+```{r}
+#Step 4
+# split the data into training and testing
+set.seed(92148)
+index = sample(1:(dim(fourier.sims)[1]),round(dim(fourier.sims)[1]*0.8))
+train.fourier  = fourier.sims[index, ]
+test.fourier = fourier.sims[-index, ]
+x.train = train.fourier[,-1]
+y.train = train.fourier[, 1]
+x.test = test.fourier[,-1]
+y.test = test.fourier[,1]
+
+#Setting up 5 Fold Cross Validation for some of our modeling
+control = trainControl(method = 'cv', number = 5)
+tunegrid = expand.grid(k = 19)
+model.knn = train(Subject ~ ., #This is where computation power gets tested!
+                   data = train.fourier,
+                   method = 'knn',
+                   metric = 'Accuracy',
+                   tuneGrid = tunegrid,
+                   trControl = control)
+knn.pred=predict(model.knn, test.fourier)
+
+```
+
+```{r}
+set.seed(92148)
+confusion.knn = table(knn.pred, y.test)
+confusion.knn
+acc.knn = mean(knn.pred==y.test)
+print("Accuracy",quote=F)
+acc.knn
+print("Sensitivity",quote=F)
+sen.knn = sensitivity(confusion.knn)
+sen.knn
+print("Specificity",quote=F)
+spec.knn = specificity(confusion.knn)
+spec.knn
+```
+
+About 70% Accuracy, 60% Sensitivity, and 80% Specificity. [Numbers might vary, even with seeds set.]
+
+Now we see what kinds of similar results we can with logistic regression (again, this is the binary classification problem only model). Unlike KNN, this specific instance of modeling did not use k-fold cross validation, and merely used one 80/20 cross validation split (This is, technically, 1 fold cross validation). The packaged train() function is compatible with a variety of models and can be further implemented to explore more potential useful models for studies like this. 
+
+This one takes much less time to run compared to KNN.
+
+```{r}
+set.seed(92148)
+glm.model=glm(Subject ~., data = train.fourier, family = 'binomial')
+glm.pred=predict(glm.model, newdata =  x.test, type = 'response')
+predicteds=ifelse(glm.pred> 0.5, 2, 1)
+confusion.lr=table(predicteds, y.test)
+confusion.lr
+acc.lr = mean(predicteds == y.test)
+print("Accuracy",quote=F)
+acc.lr
+print("Sensitivity",quote=F)
+sen.lr = sensitivity(confusion.lr)
+sen.lr
+print("Specificity",quote=F)
+spec.lr = specificity(confusion.lr)
+spec.lr
+
+```
+
+A bit more accurate and specific, slightly less sensitive.
+
+The third major type of model we ran was a Random Forest.
+
+```{r}
+set.seed(92148)
+control = trainControl(method = 'cv', number = 5)
+
+tunegrid = expand.grid(.mtry = 2)
+model.rf = train(Subject ~ ., data = train.fourier,
+                  method = 'rf',
+                  metric = 'Accuracy',
+                  tuneGrid = tunegrid,
+                  ntree = 101,
+                  trControl = control)
+
+rf.pred = predict(model.rf, x.test)
+table.rf = table(rf.pred, y.test)
+table.rf
+rf.accuracy = mean(rf.pred==y.test)
+print("Accuracy",quote=F)
+rf.accuracy
+print("Sensitivity",quote=F)
+sen.rf = sensitivity(table.rf)
+sen.rf
+print("Specificity",quote=F)
+spec.rf = specificity(table.rf)
+spec.rf
+```
+Compared to Logistic Regression, this Random Forest model is more sensitive and less specific.
+
+Finally, we ran a straightforward Neural Network, with 1 hidden layer and 3 hidden units.
+
+```{r, echo=FALSE}
+set.seed(92148)
+control = trainControl(method = 'cv', number = 5)
+model.nn = train(Subject ~ ., data = train.fourier, 
+               method='nnet', 
+               trControl = control,
+               metric = 'Accuracy')
+
+nn.pred = predict(model.nn, x.test)
+```
+
+```{r}
+table.nn = table(nn.pred, y.test)
+table.nn
+nn.accuracy = mean(nn.pred==y.test) # accuracy = 0.7181291
+print("Accuracy",quote=F)
+nn.accuracy
+print("Sensitivity",quote=F)
+sen.nn = sensitivity(table.nn)
+sen.nn
+print("Specificity",quote=F)
+spec.nn = specificity(table.nn)
+spec.nn
+```
+
+The results are comparable to that the Random Forest model.
+
+The two chunks below perform k=19 KNN with 5-fold cross validation on classifying data points as alpha, beta, or theta waves. However, due to the nature of these wave types being inherently identifiable by their frequency, this model is almost entirely accurate, incorrectly classifying maybe 1 or 2 points out of nearly half a million.
+
+```{r}
+#Step 4
+set.seed(92148)
+x4.train = train.fourier[,-2] #For step 7, the column of interest will be 2 instead of 1
+y4.train = train.fourier[, 2]
+x4.test = test.fourier[,-2]
+y4.test = test.fourier[,2]
+```
+
+```{r}
+set.seed(92148)
+model4.knn=train(Wave.Type ~ .,
+                   data = train.fourier,
+                   method = 'knn',
+                   metric = 'Accuracy',
+                   tuneGrid = tunegrid,
+                   trControl = control)
+knn.pred = predict(model4.knn, test.fourier)
+knn.acc = mean(knn.pred==y4.test)
+knn.acc
+table(knn.pred, y4.test)
+```
+
+Practically perfection. But that's expected.
+
+These can be synthesized to get a slightly clearer picture on the distribution of data and error - we take our fourier.sims data frame, assign classifiers for each combination of wave type and subject, remove the previous classifier variables, and run the same KNN modeling on that. Gathering the same performance metrics for what will be a 6x6 confusion matrix is trickier, but at a glance we can observe patterns.
+
+1, 2, and 3 are Garrett's Alpha, Beta, and Theta waves. 4, 5, and 6 are Mohammad's.
+
+```{r}
+fourier6=fourier.sims #New data frame
+SubjectWave=c(rep(1,43900),rep(2,149400),rep(3,35200),rep(4,43900),rep(5,149400),rep(6,35200)) #6 Unique Classifier Column
+fourier6=cbind(fourier6,SubjectWave) #Put them together
+fourier6$SubjectWave=as.factor(fourier6$SubjectWave) #Make the new classifiers a factor
+fourier6.crop=fourier6[,3:5] #Take the old classifiers out
+```
+
+```{r}
+set.seed(92148)
+index = sample(1:(dim(fourier6.crop)[1]),round(dim(fourier6.crop)[1]*0.8)) #Cross validate
+train.fourier  = fourier6.crop[index, ]
+test.fourier = fourier6.crop[-index, ]
+x6.train = train.fourier[,-3]
+y6.train = train.fourier[, 3]
+x6.test = test.fourier[,-3]
+y6.test = test.fourier[,3]
+
+model6.knn=train(SubjectWave ~ ., #Develop folds and model
+                   data = train.fourier,
+                   method = 'knn',
+                   metric = 'Accuracy',
+                   tuneGrid = tunegrid,
+                   trControl = control)
+knn.pred = predict(model6.knn, test.fourier)
+table(knn.pred, y6.test)
+
+print("Accuracy",quote=F)
+knn.acc = mean(knn.pred == y6.test)
+knn.acc
+print("Sensitivity",quote=F)
+sen.knn = sensitivity(confusion.knn)
+sen.knn
+print("Specificity",quote=F)
+spec.knn = specificity(confusion.knn)
+spec.knn
+```
+
+Proportionality of misclassifications mainly follows proportionality of data (far more beta waves than alpha waves which has slightly more than theta waves) and otherwise follows similar trends. Virtually no misclassifications incorrectly predict wave type.
